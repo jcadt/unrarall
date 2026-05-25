@@ -32,7 +32,7 @@ declare -ix ALLOW_FAILURES=0
 declare -x UNRAR_METHOD="e"
 declare -x CKSFV_FLAGS="-q -g"
 declare -x UNRARALL_BIN="" #Leave empty to let unrarall to loop through UNRAR_BINARIES, setting this will disable searching through UNRAR_BINARIES
-declare -x UNRAR_BINARIES=(unrar rar 7z) #Array of binaries to try and use, the order here is the order of precedence
+declare -x UNRAR_BINARIES=(unrar rar 7z unzip) #Array of binaries to try and use, the order here is the order of precedence
 declare -x UNRARALL_PID="$$"
 declare -x UNRARALL_EXECUTABLE_NAME=$(basename $0;)
 declare -x UNRARALL_PASSWORD_FILE="${HOME}/.unrar_passwords" #If this exists and unrar asks for a password
@@ -54,13 +54,14 @@ function usage()
        ${UNRARALL_EXECUTABLE_NAME} --version
 
 Usage (short options):
-     ${UNRARALL_EXECUTABLE_NAME}  [-f] [ -v | -q ] [-7] [-d] [-o DIRECTORY ] [-s] <DIRECTORY>
+     ${UNRARALL_EXECUTABLE_NAME}  [-f] [ -v | -q ] [-7] [-Z] [-d] [-o DIRECTORY ] [-s] <DIRECTORY>
      ${UNRARALL_EXECUTABLE_NAME} -h
 
 DESCRIPTON
-${UNRARALL_EXECUTABLE_NAME} is a utility to unrar and clean up various files
-(.e.g. rar files). Sub-directories are automatically recursed and if a rar file
-exists in a sub-directory then the rar file is extracted into that subdirectory.
+${UNRARALL_EXECUTABLE_NAME} is a utility to unrar, unzip and extract 7z archives
+and clean up various files (.e.g. rar, zip, 7z files). Sub-directories are automatically
+recursed and if an archive file exists in a sub-directory then the archive is
+extracted into that subdirectory.
 
 Use --clean= if you want to cleanup (delete files/folders). Otherwise no
 cleaning is done. It can also be used to delete rar files that have already been
@@ -70,6 +71,8 @@ OPTIONS
 
 -7, --7zip           Force using 7zip instead of trying to automatically find a
                      program to extract the rar files.
+-Z, --unzip          Force using unzip instead of trying to automatically find a
+                     program to extract the archive files.
 -d, --dry            Dry run of unrar and cleaning. No action will actually be
                      performed.
 --allow-failures     If there were any successful extractions, ignore errors and
@@ -98,7 +101,7 @@ OPTIONS
                      Note: files are only checked by name, not by contents!
 --password-file      Specify path to password file.
                      Default \"${UNRARALL_PASSWORD_FILE}\".
---backend            Force particular backend (unrar, rar, or 7z)
+--backend            Force particular backend (unrar, rar, 7z, or unzip)
 --find-binary        Force a particular find binary.
 --version            Give version information version.
 "
@@ -169,6 +172,9 @@ function getUnrarFlags()
     7z)
       echo -y
     ;;
+    unzip)
+      echo -o -q
+    ;;
     echo)
       echo
     ;;
@@ -194,6 +200,9 @@ function isAlreadyExtracted()
     ;;
     rar)
       file_listing_cmd="rar lb \"$2\""
+    ;;
+    unzip)
+      file_listing_cmd="unzip -l \"$2\" 2>/dev/null | tail -n +4 | head -n -2 | awk '{print \$4}'"
     ;;
     echo)
       return 1
@@ -252,6 +261,10 @@ function isRarEncrypted()
     ;;
     echo)
         echo 0
+    ;;
+    unzip)
+      # unzip encryption is checked at extraction time; assume not encrypted here
+      echo 0
     ;;
     *)
       #This code should only be reached if the programmer has made an error
@@ -341,19 +354,19 @@ function unrarall_clean_rar()
 {
   case "$1" in
     help)
-      echo "Removes rar files and sfv files"
+      echo "Removes rar, zip, 7z and sfv files"
     ;;
     clean)
       # Strip out trailing slash if there is one. If we leave it there it'll break the regex passed to find
       _RARFILE_DIR="${3%/}"
-      [ $VERBOSE -eq 1 ] && message info "Deleting ${2} rar files (in \"${_RARFILE_DIR}\")..."
+      [ $VERBOSE -eq 1 ] && message info "Deleting ${2} archive files (in \"${_RARFILE_DIR}\")..."
       if [ ! -d "${_RARFILE_DIR}" ]; then
         message error "RARFILE_DIR (${_RARFILE_DIR}) is not a directory"
         return
       fi
 
-      #-maxdepth 1 is very important, we only want to delete rar files in the current directory!
-      find_wrapper "${_RARFILE_DIR}" -maxdepth 1 -type f -iregex "${_RARFILE_DIR}/$(find_regex_escape "$2")"'\.(sfv|[0-9]+|[r-z][0-9]+|rar|part[0-9]+\.rar)$' -exec ${RM} -f $( [ $VERBOSE -eq 1 ] && echo '-v') '{}' \;
+      #-maxdepth 1 is very important, we only want to delete archive files in the current directory!
+      find_wrapper "${_RARFILE_DIR}" -maxdepth 1 -type f -iregex "${_RARFILE_DIR}/$(find_regex_escape "$2")"'\.(sfv|[0-9]+|[r-z][0-9]+|rar|part[0-9]+\.rar|zip|7z|[0-9]+)$' -exec ${RM} -f $( [ $VERBOSE -eq 1 ] && echo '-v') '{}' \;
     ;;
     *)
       message error "Could not execute clean-rar hook"
@@ -575,6 +588,12 @@ while [ -n "$1" ]; do
           UNRARALL_BIN=7z
         fi
       ;;
+      -Z | --unzip)
+        # to ensure that if --dry and then --unzip are used then we still do a dry run
+        if [ "$UNRARALL_BIN" != 'echo' ]; then
+          UNRARALL_BIN=unzip
+        fi
+      ;;
       -o | --output)
         shift
         UNRARALL_CMD="${UNRARALL_CMD} ${1}"
@@ -635,6 +654,9 @@ while [ -n "$1" ]; do
             ;;
             rar)
               UNRARALL_BIN=rar
+            ;;
+            unzip)
+              UNRARALL_BIN=unzip
             ;;
             *)
               message error "Unsupported backend \"${requested_backend}\""
@@ -780,8 +802,8 @@ FAIL_COUNT=0
 #modify IFS for new lines so filenames with spaces do not get split
 IFS_TEMP=$IFS
 IFS=$(echo -en "\n\b")
-# Match application/x-rar and the newer (file > 5.45) application/vnd.rar type
-MATCHRARMIME='^application\/(vnd\.rar|x-rar)$'
+# Match application/x-rar, application/vnd.rar, and application/zip type
+MATCHRARMIME='^application\/(vnd\.rar|x-rar|zip)$'
 
 if [ "$CKSFV" -eq 1 ]; then
   if ! type -P cksfv 2>&1 > /dev/null ; then
@@ -790,37 +812,113 @@ if [ "$CKSFV" -eq 1 ]; then
   fi
 fi
 
-# assuming only the .rar files are of interest
-for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
+# assuming only the .rar/.zip/7z files are of interest
+for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|zip|7z|001)$'); do
+  IS_SPLIT=0
 
   filename=`basename "${file}"`
   # Strip extension off filename
   sfilename="${filename%.*}"
 
-  # if rar is of style partxx.rar then only extract $filename.part01.rar
-  if [[ "$file" =~ .part[0-9]+.rar$ ]]; then
-    if [[ "$file" =~ .part0*1.rar$ ]]; then
+# Detect archive type and set the appropriate binary
+  # Determine if it's a multi-part archive (part01.rar, .001, .7z.001, etc.)
+  DETECTED_BIN=""
+
+  # rar 3.x split: .part01.rar, .part1.rar
+  if [[ "$file" =~ \.part[0-9]+\.rar$ ]]; then
+    if [[ "$file" =~ \.part0*1\.rar$ ]]; then
       sfilename=`echo "$sfilename" | sed_wrapper 's/\.part[0-9]+$//'`
       [ $VERBOSE -eq 1 ] && message info "Using rar 3.x split archive format"
+      DETECTED_BIN="rar"
+      IS_SPLIT=1
     else
       continue
     fi
-  # allow rar archives with .001 -> .999 naming
-  elif [[ "$file" =~ .[0-9][0-9][0-9]$ ]]; then
-    if [[ "$file" =~ .001$ ]]; then
-      message info "Your packager is wrong, 001 is not an acceptable filename for a rar file. We'll attempt to clean up his mess anyways..."
+  # 7z split: .7z.001, .7z.002
+  elif [[ "$file" =~ \.7z\.[0-9][0-9][0-9]$ ]]; then
+    if [[ "$file" =~ \.7z\.001$ ]]; then
+      sfilename="${filename%.7z.001}"
+      [ $VERBOSE -eq 1 ] && message info "Using 7z split archive format"
+      DETECTED_BIN="7z"
+      IS_SPLIT=1
     else
       continue
     fi
+  # generic split: .001, .002 ... .999
+  elif [[ "$file" =~ \.[0-9][0-9][0-9]$ ]]; then
+    if [[ "$file" =~ \.001$ ]]; then
+      [ $VERBOSE -eq 1 ] && message info "Generic split archive detected (.001), guessing type..."
+      filemime=`file --mime-type -b "${file}"`
+      case "$filemime" in
+        *x-rar*)    DETECTED_BIN="rar" ;;
+        *zip*)      DETECTED_BIN="unzip" ;;
+        *x-7z*)     DETECTED_BIN="7z" ;;
+        *7z*)       DETECTED_BIN="7z" ;;
+        *)          DETECTED_BIN="rar" ;; # default to rar for legacy behavior
+      esac
+    else
+      continue
+    fi
+  # plain .rar
+  elif [[ "$file" =~ \.rar$ ]]; then
+    DETECTED_BIN="rar"
+  # plain .zip
+  elif [[ "$file" =~ \.zip$ ]]; then
+    DETECTED_BIN="unzip"
+  # plain .7z
+  elif [[ "$file" =~ \.7z$ ]]; then
+    DETECTED_BIN="7z"
   fi
 
-  # check file really is a rar file
-  if [[ ! "`file --mime-type -b "${file}"`" =~ $MATCHRARMIME ]]; then
-    message error "Skipping file \"${file}\" because it does not appear to be a valid rar file."
-    # Treat this as a failure so we exit with a non zero exit code
-    let FAIL_COUNT=FAIL_COUNT+1
-    continue
+  # Fallback: if we could not determine type from extension, try to detect from file content
+  if [ -z "$DETECTED_BIN" ]; then
+    filemime=`file --mime-type -b "${file}"`
+    case "$filemime" in
+      *x-rar*)    DETECTED_BIN="rar" ;;
+      *rar*)      DETECTED_BIN="rar" ;;
+      *zip*)      DETECTED_BIN="unzip" ;;
+      *x-7z*)     DETECTED_BIN="7z" ;;
+      *7z*)       DETECTED_BIN="7z" ;;
+      *)
+        message error "Skipping file \"${file}\" because its type could not be determined."
+        let FAIL_COUNT=FAIL_COUNT+1
+        continue
+      ;;
+    esac
   fi
+
+  # Validate file is actually of the detected archive type
+  filemime=`file --mime-type -b "${file}"`
+  case "$DETECTED_BIN" in
+    rar)
+      if [[ ! "$filemime" =~ (x-rar|vnd\.rar) ]]; then
+        message error "Skipping file \"${file}\" because it does not appear to be a valid rar file (mime: $filemime)."
+        let FAIL_COUNT=FAIL_COUNT+1
+        continue
+      fi
+    ;;
+    unzip)
+      if [[ ! "$filemime" =~ zip ]]; then
+        message error "Skipping file \"${file}\" because it does not appear to be a valid zip file (mime: $filemime)."
+        let FAIL_COUNT=FAIL_COUNT+1
+        continue
+      fi
+    ;;
+    7z)
+      # 7z files may report various mime types; for split .7z.001 be lenient
+      if [[ ! "$filemime" =~ (x-7z|7z|octet-stream) ]]; then
+        if [ "$IS_SPLIT" != "1" ]; then
+          message error "Skipping file \"${file}\" because it does not appear to be a valid 7z file (mime: $filemime)."
+          let FAIL_COUNT=FAIL_COUNT+1
+          continue
+        fi
+      fi
+    ;;
+  esac
+
+  # Set the working binary for this archive
+  UNRARALL_BIN="$DETECTED_BIN"
+  [ $VERBOSE -eq 1 ] && message info "Detected archive type: $DETECTED_BIN"
 
   let COUNT=COUNT+1
 
@@ -866,41 +964,105 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
   fi
   tmp_dir=`pwd`
 
-  # unrar file if SFV checked out or --force was given
+  # unrar/unzip/7z file if SFV checked out or --force was given
   if [ "$SUCCESS" -eq 0 ] || [ "$FORCE" -eq 1 ]; then
-    message nnl "Extracting (${UNRAR_METHOD}) \"$file\"..."
-    file_encrypted=$(isRarEncrypted ${UNRARALL_BIN} ${filenameAbsolute})
-    if [ "${file_encrypted}" -eq 0 ]; then
-      # The file is not encrypted. We're extracting without a password
-      # Use eval so that redirection gets evaluated correctly
-      eval ${UNRARALL_BIN} ${UNRAR_METHOD} $( getUnrarFlags ${UNRARALL_BIN}) -p- "\"${filenameAbsolute}\"" \
-        $([ "$VERBOSE" -eq 0 -a "X${UNRARALL_BIN}" != "Xecho" ] && echo ">/dev/null")
-      SUCCESS=$?
-    else
-      # The file is encrypted. if we have a password file, then use it
-      if [ -s "${UNRARALL_PASSWORD_FILE}" ] ; then
-        [ $VERBOSE -eq 1 ] && message info "This archive is encrypted. Trying passwords from password file \"${UNRARALL_PASSWORD_FILE}\"..."
-        while true; do read password || break
-          # Use eval so that redirection gets evaluated correctly
-          eval ${UNRARALL_BIN} ${UNRAR_METHOD} $( getUnrarFlags ${UNRARALL_BIN}) -p"\"$password\"" "\"${filenameAbsolute}\"" \
-            $([ "$VERBOSE" -eq 0 -a "X${UNRARALL_BIN}" != "Xecho" ] && echo ">/dev/null")
+    # Determine the effective binary to use for this file
+    EFFECTIVE_BIN="$UNRARALL_BIN"
+    [ -z "$EFFECTIVE_BIN" ] && EFFECTIVE_BIN="$DETECTED_BIN"
+    [ -z "$EFFECTIVE_BIN" ] && EFFECTIVE_BIN="rar"
+
+    message nnl "Extracting (${EFFECTIVE_BIN}) \"$file\"..."
+    file_encrypted=$(isRarEncrypted ${EFFECTIVE_BIN} ${filenameAbsolute})
+
+    case "$EFFECTIVE_BIN" in
+      rar|unrar)
+        if [ "${file_encrypted}" -eq 0 ]; then
+          # The file is not encrypted. We're extracting without a password
+          eval ${EFFECTIVE_BIN} ${UNRAR_METHOD} $( getUnrarFlags ${EFFECTIVE_BIN}) -p- "\"${filenameAbsolute}\"" \
+            $([ "$VERBOSE" -eq 0 -a "X${EFFECTIVE_BIN}" != "Xecho" ] && echo ">/dev/null")
           SUCCESS=$?
-          if [ "$SUCCESS" -eq 0 ] ; then
-            [ $VERBOSE -eq 1 ] && message ok "Extraction succeeded using password: \"${password}\""
-            break
+        else
+          # The file is encrypted. if we have a password file, then use it
+          if [ -s "${UNRARALL_PASSWORD_FILE}" ] ; then
+            [ $VERBOSE -eq 1 ] && message info "This archive is encrypted. Trying passwords from password file \"${UNRARALL_PASSWORD_FILE}\"..."
+            while true; do read password || break
+              eval ${EFFECTIVE_BIN} ${UNRAR_METHOD} $( getUnrarFlags ${EFFECTIVE_BIN}) -p"\"$password\"" "\"${filenameAbsolute}\"" \
+                $([ "$VERBOSE" -eq 0 -a "X${EFFECTIVE_BIN}" != "Xecho" ] && echo ">/dev/null")
+              SUCCESS=$?
+              if [ "$SUCCESS" -eq 0 ] ; then
+                [ $VERBOSE -eq 1 ] && message ok "Extraction succeeded using password: \"${password}\""
+                break
+              else
+                [ $VERBOSE -eq 1 ] && message error "Extraction failed using password: \"${password}\""
+              fi
+            done < "$UNRARALL_PASSWORD_FILE"
           else
-            [ $VERBOSE -eq 1 ] && message error "Extraction failed using password: \"${password}\""
+            message error "Archive \"$file\" is encrypted. Please put the password in \"${UNRARALL_PASSWORD_FILE}\" to extract it."
+            SUCCESS=1
           fi
-        done < "$UNRARALL_PASSWORD_FILE"
-      else
-        message error "Archive \"$file\" is encrypted. Please put the password in \"${UNRARALL_PASSWORD_FILE}\" to extract it."
+        fi
+      ;;
+      7z)
+        if [ "${file_encrypted}" -eq 0 ]; then
+          eval 7z x -y "\"${filenameAbsolute}\"" \
+            $([ "$VERBOSE" -eq 0 ] && echo ">/dev/null")
+          SUCCESS=$?
+        else
+          if [ -s "${UNRARALL_PASSWORD_FILE}" ] ; then
+            [ $VERBOSE -eq 1 ] && message info "This archive is encrypted. Trying passwords from password file \"${UNRARALL_PASSWORD_FILE}\"..."
+            while true; do read password || break
+              eval 7z x -p"\"$password\"" -y "\"${filenameAbsolute}\"" \
+                $([ "$VERBOSE" -eq 0 ] && echo ">/dev/null")
+              SUCCESS=$?
+              if [ "$SUCCESS" -eq 0 ] ; then
+                [ $VERBOSE -eq 1 ] && message ok "Extraction succeeded using password: \"${password}\""
+                break
+              else
+                [ $VERBOSE -eq 1 ] && message error "Extraction failed using password: \"${password}\""
+              fi
+            done < "$UNRARALL_PASSWORD_FILE"
+          else
+            message error "Archive \"$file\" is encrypted. Please put the password in \"${UNRARALL_PASSWORD_FILE}\" to extract it."
+            SUCCESS=1
+          fi
+        fi
+      ;;
+      unzip)
+        # unzip detects encryption at extraction time
+        eval unzip -o -q "\"${filenameAbsolute}\"" \
+          $([ "$VERBOSE" -eq 0 ] && echo ">/dev/null")
+        SUCCESS=$?
+        if [ "$SUCCESS" -ne 0 ] && [ "${file_encrypted}" -eq 1 ]; then
+          if [ -s "${UNRARALL_PASSWORD_FILE}" ] ; then
+            [ $VERBOSE -eq 1 ] && message info "This archive is encrypted. Trying passwords from password file \"${UNRARALL_PASSWORD_FILE}\"..."
+            while true; do read password || break
+              eval unzip -o -P "\"$password\"" -q "\"${filenameAbsolute}\"" \
+                $([ "$VERBOSE" -eq 0 ] && echo ">/dev/null")
+              SUCCESS=$?
+              if [ "$SUCCESS" -eq 0 ] ; then
+                [ $VERBOSE -eq 1 ] && message ok "Extraction succeeded using password: \"${password}\""
+                break
+              else
+                [ $VERBOSE -eq 1 ] && message error "Extraction failed using password: \"${password}\""
+              fi
+            done < "$UNRARALL_PASSWORD_FILE"
+          else
+            message error "Archive \"$file\" appears encrypted. Please put the password in \"${UNRARALL_PASSWORD_FILE}\" to extract it."
+          fi
+        fi
+      ;;
+      echo)
+        SUCCESS=0
+      ;;
+      *)
+        message error "Unsupported extraction binary \"${EFFECTIVE_BIN}\""
         SUCCESS=1
-      fi
-    fi
+      ;;
+    esac
   fi
 
   # Check if any recursive extraction is needed
-  if [ "$SUCCESS" -eq 0 ] && [ "${DEPTH}" -gt 0 ] && [[ -n `find_wrapper . -depth -iregex '.*\.(rar|001)$'` ]]; then
+  if [ "$SUCCESS" -eq 0 ] && [ "${DEPTH}" -gt 0 ] && [[ -n `find_wrapper . -depth -iregex '.*\.(rar|zip|7z|001)$'` ]]; then
     [ $VERBOSE -eq 1 ] && message ok "Detected rar archives inside of \"$file\", recursively extracting"
     let NEW_DEPTH=DEPTH-1
     eval $UNRARALL_CMD --depth $NEW_DEPTH ${tmp_dir}
