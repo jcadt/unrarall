@@ -533,7 +533,7 @@ SCRIPT_NAME=`basename "${BASH_SOURCE[0]}"`
 UNRARALL_CMD="$SCRIPT_DIR/$SCRIPT_NAME"
 
 while [ -n "$1" ]; do
-  if [ $# -gt 1 ] || [ $( echo "$1" | grep -Ec '^(-h|--help|--version)$' ) -eq 1 ] ; then
+  if [ $# -gt 1 ] || [[ "$1" == -* ]] || [ $( echo "$1" | grep -Ec '^(-h|--help|--version)$' ) -eq 1 ] ; then
 
     # save all the args passed to the cmd, except for --depth
     if [ "${1}" != "--depth" ]; then
